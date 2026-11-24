@@ -1,0 +1,6 @@
+{
+  "name": "InvoiceFlow",
+  "description": "Automated B2B Invoice & Accounts Receivable Chaser with Paystack payments, WhatsApp chasing, and Resend escalation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+.pnp/
+.pnp.*
+
+# Next.js build & cache
+.next/
+out/
+build/
+dist/
+
+# Testing & coverage
+coverage/
+
+# Environment variables (keep .env.example)
+.env*
+!.env.example
+
+# Logs & OS files
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store
+
+# TypeScript generated files
+next-env.d.ts
+*.tsbuildinfo
+
+# Local IDE / Vercel
+.vercel/
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/tasks.json
+!.vscode/launch.json
