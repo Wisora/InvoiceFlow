@@ -41,6 +41,10 @@ import {
   getEffectiveInvoiceStatus,
   getTodayIsoDate,
 } from '@/lib/formatters';
+import {
+  getReminderLogClearedAt,
+  setReminderLogClearedAt,
+} from '@/lib/reminderLogClearStorage';
 import type {
   Client,
   Invoice,
@@ -73,6 +77,10 @@ export default function DashboardPage() {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('invoices');
   const [statusFilter, setStatusFilter] = useState<InvoiceFilter>('all');
   const [searchQuery, setSearchQuery] = useState('');
+
+  // Client-side localStorage clear state for Reminder Log view (never deletes DB rows)
+  const [clearedAt, setClearedAt] = useState<string | null>(null);
+  const [showClearedLogs, setShowClearedLogs] = useState(false);
 
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showCsvModal, setShowCsvModal] = useState(false);
@@ -152,6 +160,7 @@ export default function DashboardPage() {
 
       const typedOrg = org as Organization;
       setOrganization(typedOrg);
+      setClearedAt(getReminderLogClearedAt(typedOrg.id));
 
       // 2. Fetch clients, invoices, and reminder_logs in parallel
       const [clientsRes, invoicesRes, logsRes] = await Promise.all([
@@ -313,6 +322,34 @@ export default function DashboardPage() {
       return hay.includes(q);
     });
   }, [invoices, searchQuery, statusFilter]);
+
+  // Filter reminder logs locally when user clicks "Clear Log" while keeping rows in Supabase
+  const visibleReminderLogs = useMemo(() => {
+    if (showClearedLogs || !clearedAt) return reminderLogs;
+    const cutoffMs = new Date(clearedAt).getTime();
+    if (Number.isNaN(cutoffMs)) return reminderLogs;
+    return reminderLogs.filter((log) => new Date(log.sent_at).getTime() > cutoffMs);
+  }, [reminderLogs, clearedAt, showClearedLogs]);
+
+  function handleClearReminderLog() {
+    if (!organization) return;
+    const nowIso = new Date().toISOString();
+    setReminderLogClearedAt(organization.id, nowIso);
+    setClearedAt(nowIso);
+    setShowClearedLogs(false);
+    pushToast(
+      'success',
+      'Reminder log view cleared. Audit history remains saved in Supabase.'
+    );
+  }
+
+  function handleRestoreReminderLog() {
+    if (!organization) return;
+    setReminderLogClearedAt(organization.id, null);
+    setClearedAt(null);
+    setShowClearedLogs(false);
+    pushToast('success', 'Reminder log clear filter reset.');
+  }
 
   async function handleSignOut() {
     await supabase.auth.signOut();
@@ -653,7 +690,10 @@ export default function DashboardPage() {
         )}
 
         {/* 4 KPI Summary Cards */}
-        <section aria-label="Receivables Summary" className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <section
+          aria-label="Receivables Summary"
+          className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4"
+        >
           <div className="glass-panel rounded-2xl p-5">
             <div className="flex items-center justify-between text-xs font-medium text-slate-400">
               <span>Total Outstanding</span>
@@ -851,25 +891,18 @@ export default function DashboardPage() {
                           </td>
 
                           <td className="px-5 py-3.5 align-top">
-                            <div className="font-medium text-slate-100">
-                              {inv.client?.name || 'Unknown Client'}
-                              {inv.client?.company ? (
-                                <span className="text-slate-400">
-                                  {' '}
-                                  · {inv.client.company}
-                                </span>
-                              ) : null}
+                            <div className="font-medium text-slate-200">
+                              {inv.client?.name ?? 'Unknown Client'}
                             </div>
-                            <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
-                              <span>{inv.client?.email}</span>
-                              <span aria-hidden="true">·</span>
+                            <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-400">
+                              {inv.client?.company && <span>{inv.client.company}</span>}
                               <span
-                                className={`font-medium ${
-                                  reliability === 'At Risk'
-                                    ? 'text-rose-400'
+                                className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                                  reliability === 'On-Time'
+                                    ? 'bg-emerald-500/10 text-emerald-300'
                                     : reliability === 'Slow Payer'
-                                    ? 'text-amber-400'
-                                    : 'text-emerald-400'
+                                    ? 'bg-amber-500/10 text-amber-300'
+                                    : 'bg-rose-500/10 text-rose-300'
                                 }`}
                               >
                                 {reliability}
@@ -877,21 +910,16 @@ export default function DashboardPage() {
                             </div>
                           </td>
 
-                          <td className="px-5 py-3.5 align-top">
-                            <div className="font-mono tabular-nums text-slate-200">
-                              {formatDate(inv.due_date)}
-                            </div>
-                            {isUnpaid && daysOver > 0 && (
-                              <div className="mt-0.5 font-mono text-[11px] text-rose-400 tabular-nums">
+                          <td className="px-5 py-3.5 align-top tabular-nums">
+                            <div className="text-slate-200">{formatDate(inv.due_date)}</div>
+                            {effectiveStatus === 'overdue' && daysOver > 0 && (
+                              <div className="mt-0.5 text-[11px] font-medium text-rose-400">
                                 {daysOver}d overdue
                               </div>
                             )}
-                            {inv.promised_pay_date && effectiveStatus !== 'paid' && (
-                              <div className="mt-1 inline-flex items-center gap-1 text-[11px] text-sky-300">
-                                <CalendarClock className="h-3 w-3" />
-                                <span className="font-mono tabular-nums">
-                                  Promised {formatDate(inv.promised_pay_date)}
-                                </span>
+                            {inv.last_reminded_at && (
+                              <div className="mt-0.5 text-[11px] text-slate-500">
+                                Reminded {formatDate(inv.last_reminded_at)}
                               </div>
                             )}
                           </td>
@@ -901,85 +929,82 @@ export default function DashboardPage() {
                           </td>
 
                           <td className="px-5 py-3.5 align-top">
-                            <div className="flex flex-col items-start gap-1.5">
-                              <StatusBadge status={effectiveStatus} />
-                              {hasDispute && (
-                                <div
-                                  title={inv.dispute_note ?? undefined}
-                                  className="inline-flex max-w-[200px] items-start gap-1 rounded-md border border-rose-500/30 bg-rose-500/10 px-2 py-1 text-[11px] text-rose-200"
-                                >
-                                  <Flag className="mt-0.5 h-3 w-3 shrink-0 text-rose-400" />
-                                  <span className="line-clamp-2">{inv.dispute_note}</span>
-                                </div>
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span
+                                className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-semibold capitalize ${
+                                  effectiveStatus === 'paid'
+                                    ? 'bg-emerald-500/15 text-emerald-300'
+                                    : effectiveStatus === 'overdue'
+                                    ? 'bg-rose-500/15 text-rose-300'
+                                    : effectiveStatus === 'sent'
+                                    ? 'bg-sky-500/15 text-sky-300'
+                                    : 'bg-slate-800 text-slate-300'
+                                }`}
+                              >
+                                {effectiveStatus === 'paid' && (
+                                  <Check className="h-3 w-3" />
+                                )}
+                                {effectiveStatus === 'overdue' && (
+                                  <Clock className="h-3 w-3" />
+                                )}
+                                {effectiveStatus}
+                              </span>
+
+                              {inv.promised_pay_date && effectiveStatus !== 'paid' && (
+                                <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-300">
+                                  <CalendarClock className="h-3 w-3" />
+                                  Promised {formatDate(inv.promised_pay_date)}
+                                </span>
                               )}
-                              {inv.last_reminded_at && (
-                                <span className="text-[11px] text-slate-500 font-mono tabular-nums">
-                                  Chased {formatDate(inv.last_reminded_at)}
+
+                              {hasDispute && (
+                                <span
+                                  title={inv.dispute_note ?? undefined}
+                                  className="inline-flex items-center gap-1 rounded-full bg-rose-500/15 px-2 py-0.5 text-[10px] font-medium text-rose-300"
+                                >
+                                  <Flag className="h-3 w-3" />
+                                  Disputed
                                 </span>
                               )}
                             </div>
                           </td>
 
                           <td className="px-5 py-3.5 text-right align-top">
-                            <div className="flex flex-wrap items-center justify-end gap-1.5">
+                            <div className="inline-flex items-center justify-end gap-1.5">
                               {isUnpaid && (
                                 <button
                                   type="button"
-                                  disabled={remindingId === inv.id}
                                   onClick={() => handleSendManualReminder(inv)}
-                                  className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800/80 px-2.5 py-1.5 text-[11px] font-medium text-slate-100 transition-colors hover:border-emerald-500/50 hover:text-emerald-300 disabled:opacity-50 whitespace-nowrap"
+                                  disabled={remindingId === inv.id}
+                                  title="Send reminder email"
+                                  className="inline-flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-900/80 px-2.5 py-1.5 text-[11px] font-medium text-slate-200 transition-colors hover:border-slate-700 hover:bg-slate-800 disabled:opacity-50"
                                 >
                                   {remindingId === inv.id ? (
                                     <Loader2 className="h-3 w-3 animate-spin" />
                                   ) : (
-                                    <Send className="h-3 w-3" />
+                                    <Send className="h-3 w-3 text-emerald-400" />
                                   )}
-                                  <span>Send Reminder</span>
+                                  <span>Remind</span>
                                 </button>
                               )}
 
-                              {isUnpaid &&
-                                (whatsappUrl ? (
-                                  <a
-                                    href={whatsappUrl}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1.5 text-[11px] font-medium text-emerald-300 transition-colors hover:bg-emerald-500/20 whitespace-nowrap"
-                                  >
-                                    <MessageCircle className="h-3 w-3" />
-                                    <span>Chase on WhatsApp</span>
-                                  </a>
-                                ) : (
-                                  <span
-                                    title="Add a phone number on the client to enable WhatsApp chasing"
-                                    className="inline-flex cursor-not-allowed items-center gap-1 rounded-lg border border-slate-800 bg-slate-900/40 px-2.5 py-1.5 text-[11px] text-slate-600 whitespace-nowrap"
-                                  >
-                                    <MessageCircle className="h-3 w-3" />
-                                    <span>No Phone</span>
-                                  </span>
-                                ))}
-
-                              {isUnpaid && (
-                                <button
-                                  type="button"
-                                  disabled={markingPaidId === inv.id}
-                                  onClick={() => handleMarkPaid(inv)}
-                                  className="inline-flex items-center gap-1 rounded-lg border border-slate-800 px-2 py-1.5 text-[11px] font-medium text-slate-300 transition-colors hover:border-slate-700 hover:text-slate-100 whitespace-nowrap"
+                              {whatsappUrl && isUnpaid && (
+                                <a
+                                  href={whatsappUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  title="Open WhatsApp reminder"
+                                  className="inline-flex items-center rounded-lg border border-slate-800 bg-slate-900/80 p-1.5 text-emerald-400 transition-colors hover:border-slate-700 hover:bg-slate-800"
                                 >
-                                  {markingPaidId === inv.id ? (
-                                    <Loader2 className="h-3 w-3 animate-spin" />
-                                  ) : (
-                                    <Check className="h-3 w-3" />
-                                  )}
-                                  <span>Mark Paid</span>
-                                </button>
+                                  <MessageCircle className="h-3.5 w-3.5" />
+                                </a>
                               )}
 
                               <button
                                 type="button"
                                 onClick={() => handleCopyPayLink(inv.id)}
-                                title="Copy public payment link"
-                                className="inline-flex items-center gap-1 rounded-lg border border-slate-800 p-1.5 text-slate-400 transition-colors hover:border-slate-700 hover:text-slate-100"
+                                title="Copy payment link"
+                                className="inline-flex items-center rounded-lg border border-slate-800 bg-slate-900/80 p-1.5 text-slate-300 transition-colors hover:border-slate-700 hover:bg-slate-800"
                               >
                                 {copiedId === inv.id ? (
                                   <Check className="h-3.5 w-3.5 text-emerald-400" />
@@ -991,11 +1016,27 @@ export default function DashboardPage() {
                               <Link
                                 href={payPath}
                                 target="_blank"
-                                title="Open public payment portal"
-                                className="inline-flex items-center gap-1 rounded-lg border border-slate-800 p-1.5 text-slate-400 transition-colors hover:border-slate-700 hover:text-slate-100"
+                                title="Open hosted payment page"
+                                className="inline-flex items-center rounded-lg border border-slate-800 bg-slate-900/80 p-1.5 text-slate-300 transition-colors hover:border-slate-700 hover:bg-slate-800"
                               >
                                 <ExternalLink className="h-3.5 w-3.5" />
                               </Link>
+
+                              {effectiveStatus !== 'paid' && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleMarkPaid(inv)}
+                                  disabled={markingPaidId === inv.id}
+                                  className="inline-flex items-center gap-1 rounded-lg bg-emerald-500/15 px-2.5 py-1.5 text-[11px] font-semibold text-emerald-300 transition-colors hover:bg-emerald-500/25 disabled:opacity-50"
+                                >
+                                  {markingPaidId === inv.id ? (
+                                    <Loader2 className="h-3 w-3 animate-spin" />
+                                  ) : (
+                                    <CheckCircle2 className="h-3 w-3" />
+                                  )}
+                                  <span>Mark Paid</span>
+                                </button>
+                              )}
                             </div>
                           </td>
                         </tr>
@@ -1010,16 +1051,17 @@ export default function DashboardPage() {
 
         {/* TAB 2: CLIENTS */}
         {activeTab === 'clients' && (
-          <section className="space-y-4">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 text-sm font-semibold text-slate-200">
+          <section className="glass-panel overflow-hidden rounded-2xl">
+            <div className="flex flex-col justify-between gap-3 border-b border-slate-800/80 px-5 py-4 sm:flex-row sm:items-center">
+              <div className="flex items-center gap-2">
                 <Users className="h-4 w-4 text-emerald-400" />
-                <span>Client Directory &amp; Payment Reliability</span>
+                <h2 className="text-sm font-semibold text-slate-100">Client Directory</h2>
               </div>
+
               <button
                 type="button"
                 onClick={() => setShowAddClientForm((prev) => !prev)}
-                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-800 bg-slate-900/80 px-3.5 py-2 text-xs font-semibold text-slate-100 hover:border-slate-700"
+                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-800 bg-slate-900/80 px-3.5 py-1.5 text-xs font-semibold text-slate-200 transition-colors hover:border-slate-700 hover:bg-slate-800"
               >
                 <UserPlus className="h-3.5 w-3.5 text-emerald-400" />
                 <span>{showAddClientForm ? 'Close Form' : 'Add Client'}</span>
@@ -1029,158 +1071,220 @@ export default function DashboardPage() {
             {showAddClientForm && (
               <form
                 onSubmit={handleAddClient}
-                className="glass-panel grid grid-cols-1 gap-3 rounded-2xl p-5 sm:grid-cols-4"
+                className="grid grid-cols-1 gap-3 border-b border-slate-800/80 bg-slate-950/50 px-5 py-4 sm:grid-cols-2 lg:grid-cols-5"
               >
                 <input
                   type="text"
                   required
                   value={newClientName}
                   onChange={(e) => setNewClientName(e.target.value)}
-                  placeholder="Contact Name *"
-                  className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-600 focus:border-emerald-500/60 focus:outline-none"
+                  placeholder="Client name *"
+                  className="rounded-xl border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-500 focus:border-emerald-500/60 focus:outline-none"
                 />
                 <input
                   type="text"
                   value={newClientCompany}
                   onChange={(e) => setNewClientCompany(e.target.value)}
                   placeholder="Company"
-                  className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-600 focus:border-emerald-500/60 focus:outline-none"
+                  className="rounded-xl border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-500 focus:border-emerald-500/60 focus:outline-none"
                 />
                 <input
                   type="email"
                   required
                   value={newClientEmail}
                   onChange={(e) => setNewClientEmail(e.target.value)}
-                  placeholder="Billing Email *"
-                  className="rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-600 focus:border-emerald-500/60 focus:outline-none"
+                  placeholder="Email *"
+                  className="rounded-xl border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-500 focus:border-emerald-500/60 focus:outline-none"
                 />
-                <div className="flex gap-2">
-                  <input
-                    type="tel"
-                    value={newClientPhone}
-                    onChange={(e) => setNewClientPhone(e.target.value)}
-                    placeholder="+27821234567"
-                    className="w-full rounded-xl border border-slate-800 bg-slate-950/70 px-3 py-2 font-mono text-xs text-slate-100 placeholder:text-slate-600 focus:border-emerald-500/60 focus:outline-none"
-                  />
-                  <button
-                    type="submit"
-                    disabled={savingClient}
-                    className="rounded-xl bg-emerald-500 px-4 py-2 text-xs font-semibold text-slate-950 hover:bg-emerald-400 disabled:opacity-60 whitespace-nowrap"
-                  >
-                    {savingClient ? 'Saving...' : 'Save'}
-                  </button>
-                </div>
+                <input
+                  type="tel"
+                  value={newClientPhone}
+                  onChange={(e) => setNewClientPhone(e.target.value)}
+                  placeholder="Phone (e.g. +27...)"
+                  className="rounded-xl border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-500 focus:border-emerald-500/60 focus:outline-none"
+                />
+                <button
+                  type="submit"
+                  disabled={savingClient}
+                  className="inline-flex items-center justify-center gap-1.5 rounded-xl bg-emerald-500 px-4 py-2 text-xs font-semibold text-slate-950 transition-colors hover:bg-emerald-400 disabled:opacity-50"
+                >
+                  {savingClient && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                  <span>{savingClient ? 'Saving...' : 'Save Client'}</span>
+                </button>
               </form>
             )}
 
-            <div className="glass-panel overflow-hidden rounded-2xl">
-              {clients.length === 0 ? (
-                <div className="px-6 py-14 text-center text-xs text-slate-400">
-                  No clients added yet. Create an invoice or click &ldquo;Add Client&rdquo; above.
-                </div>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left text-xs">
-                    <thead className="border-b border-slate-800/80 bg-slate-950/50 text-slate-400">
-                      <tr>
-                        <th className="px-5 py-3 font-medium">Client</th>
-                        <th className="px-5 py-3 font-medium">Email &amp; WhatsApp</th>
-                        <th className="px-5 py-3 font-medium">Reliability</th>
-                        <th className="px-5 py-3 text-right font-medium">Open Balance</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-800/60">
-                      {clients.map((client) => {
-                        const reliability =
-                          clientReliabilityMap.get(client.id) ?? client.reliability_label;
-                        const clientOutstanding = invoices
-                          .filter((i) => {
-                            const eff = getEffectiveInvoiceStatus(i);
-                            return (
-                              i.client_id === client.id &&
-                              (eff === 'sent' || eff === 'overdue')
-                            );
-                          })
-                          .reduce((sum, i) => sum + Number(i.amount), 0);
+            {clients.length === 0 ? (
+              <div className="px-6 py-14 text-center text-xs text-slate-400">
+                No clients yet. Click &ldquo;Add Client&rdquo; or create an invoice to add one.
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[720px] text-left text-xs">
+                  <thead className="border-b border-slate-800/80 bg-slate-950/50 text-slate-400">
+                    <tr>
+                      <th className="px-5 py-3 font-medium">Client</th>
+                      <th className="px-5 py-3 font-medium">Contact</th>
+                      <th className="px-5 py-3 font-medium">Reliability</th>
+                      <th className="px-5 py-3 text-right font-medium">Open Balance</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60">
+                    {clients.map((client) => {
+                      const reliability =
+                        clientReliabilityMap.get(client.id) ?? client.reliability_label;
+                      const clientInvoices = invoices.filter(
+                        (i) => i.client_id === client.id
+                      );
+                      const openBalance = clientInvoices.reduce((acc, inv) => {
+                        const st = getEffectiveInvoiceStatus(inv);
+                        return st === 'sent' || st === 'overdue'
+                          ? acc + (Number(inv.amount) || 0)
+                          : acc;
+                      }, 0);
 
-                        return (
-                          <tr key={client.id} className="hover:bg-slate-900/50">
-                            <td className="px-5 py-3.5">
-                              <div className="font-semibold text-slate-100">
-                                {client.name}
-                              </div>
+                      return (
+                        <tr key={client.id} className="hover:bg-slate-900/50">
+                          <td className="px-5 py-3.5">
+                            <div className="font-semibold text-slate-100">{client.name}</div>
+                            {client.company && (
                               <div className="text-[11px] text-slate-400">
-                                {client.company || 'Individual / Direct'}
+                                {client.company}
                               </div>
-                            </td>
-                            <td className="px-5 py-3.5">
-                              <div className="text-slate-200">{client.email}</div>
-                              <div className="font-mono text-[11px] text-slate-400">
-                                {client.phone || 'No WhatsApp number'}
+                            )}
+                          </td>
+                          <td className="px-5 py-3.5 text-slate-300">
+                            <div className="flex items-center gap-1.5">
+                              <Mail className="h-3 w-3 text-slate-500" />
+                              <span>{client.email}</span>
+                            </div>
+                            {client.phone && (
+                              <div className="mt-0.5 text-[11px] text-slate-400">
+                                {client.phone}
                               </div>
-                            </td>
-                            <td className="px-5 py-3.5">
-                              <ReliabilityBadge label={reliability} />
-                            </td>
-                            <td className="px-5 py-3.5 text-right font-mono font-semibold tabular-nums text-slate-100">
-                              {formatCurrency(clientOutstanding, baseCurrency)}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
+                            )}
+                          </td>
+                          <td className="px-5 py-3.5">
+                            <span
+                              className={`inline-flex rounded-full px-2.5 py-0.5 text-[11px] font-medium ${
+                                reliability === 'On-Time'
+                                  ? 'bg-emerald-500/10 text-emerald-300'
+                                  : reliability === 'Slow Payer'
+                                  ? 'bg-amber-500/10 text-amber-300'
+                                  : 'bg-rose-500/10 text-rose-300'
+                              }`}
+                            >
+                              {reliability}
+                            </span>
+                          </td>
+                          <td className="px-5 py-3.5 text-right font-mono font-semibold tabular-nums text-slate-100">
+                            {formatCurrency(openBalance, baseCurrency)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </section>
         )}
 
         {/* TAB 3: REMINDER LOG */}
         {activeTab === 'logs' && (
           <section className="glass-panel overflow-hidden rounded-2xl">
-            <div className="flex items-center gap-2 border-b border-slate-800/80 px-5 py-4 text-sm font-semibold text-slate-200">
-              <History className="h-4 w-4 text-emerald-400" />
-              <span>Automated &amp; Manual Chaser Audit Log</span>
+            <div className="flex flex-col justify-between gap-3 border-b border-slate-800/80 px-5 py-4 sm:flex-row sm:items-center">
+              <div className="flex items-center gap-2">
+                <History className="h-4 w-4 text-emerald-400" />
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-100">
+                    Automated &amp; Manual Chaser Audit Log
+                  </h2>
+                  <p className="text-[11px] text-slate-400">
+                    Showing {visibleReminderLogs.length} of {reminderLogs.length} entries
+                    {clearedAt && !showClearedLogs
+                      ? ` · Cleared since ${formatDate(clearedAt)}`
+                      : ''}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {clearedAt && (
+                  <button
+                    type="button"
+                    onClick={() => setShowClearedLogs((prev) => !prev)}
+                    className="rounded-xl border border-slate-800 bg-slate-900/80 px-3 py-1.5 text-xs font-semibold text-slate-200 transition-colors hover:border-slate-700 hover:bg-slate-800"
+                  >
+                    {showClearedLogs ? 'Hide Cleared' : 'Show Full History'}
+                  </button>
+                )}
+
+                {clearedAt && (
+                  <button
+                    type="button"
+                    onClick={handleRestoreReminderLog}
+                    className="rounded-xl border border-slate-800 bg-slate-900/80 px-3 py-1.5 text-xs font-semibold text-slate-200 transition-colors hover:border-slate-700 hover:bg-slate-800"
+                  >
+                    Reset Clear
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={handleClearReminderLog}
+                  disabled={!organization || visibleReminderLogs.length === 0}
+                  className="rounded-xl border border-slate-800 bg-slate-900/80 px-3 py-1.5 text-xs font-semibold text-slate-200 transition-colors hover:border-slate-700 hover:bg-slate-800 disabled:opacity-50"
+                >
+                  Clear Log
+                </button>
+              </div>
             </div>
 
-            {reminderLogs.length === 0 ? (
+            {visibleReminderLogs.length === 0 ? (
               <div className="px-6 py-14 text-center text-xs text-slate-400">
-                No reminders have been sent yet. Click &ldquo;Send Reminder&rdquo; on any
-                invoice or trigger &ldquo;Run Chaser Sweep&rdquo;.
+                {reminderLogs.length === 0
+                  ? 'No reminders dispatched yet. Use "Remind" on an invoice or "Run Chaser Sweep".'
+                  : 'All current reminder log entries have been cleared from this view. Use "Show Full History" or "Reset Clear" to restore them.'}
               </div>
             ) : (
               <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs">
+                <table className="w-full min-w-[680px] text-left text-xs">
                   <thead className="border-b border-slate-800/80 bg-slate-950/50 text-slate-400">
                     <tr>
                       <th className="px-5 py-3 font-medium">Sent At</th>
-                      <th className="px-5 py-3 font-medium">Invoice #</th>
-                      <th className="px-5 py-3 font-medium">Recipient</th>
-                      <th className="px-5 py-3 font-medium">Escalation Tier</th>
-                      <th className="px-5 py-3 font-medium">Subject</th>
+                      <th className="px-5 py-3 font-medium">Invoice</th>
+                      <th className="px-5 py-3 font-medium">Template</th>
+                      <th className="px-5 py-3 font-medium">Status</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/60">
-                    {reminderLogs.map((log) => (
+                    {visibleReminderLogs.map((log) => (
                       <tr key={log.id} className="hover:bg-slate-900/50">
-                        <td className="px-5 py-3.5 font-mono tabular-nums text-slate-300">
+                        <td className="px-5 py-3.5 tabular-nums text-slate-300">
                           {new Date(log.sent_at).toLocaleString()}
                         </td>
-                        <td className="px-5 py-3.5 font-mono font-semibold text-slate-100">
-                          {log.invoice?.invoice_number || '—'}
-                        </td>
-                        <td className="px-5 py-3.5 text-slate-300">
-                          <span className="inline-flex items-center gap-1.5">
-                            <Mail className="h-3 w-3 text-slate-500" />
-                            {log.recipient}
-                          </span>
+                        <td className="px-5 py-3.5 font-mono font-medium text-slate-100">
+                          {log.invoice?.invoice_number ?? log.invoice_id}
                         </td>
                         <td className="px-5 py-3.5 font-mono text-[11px] text-slate-300">
-                          {log.template_tier}
+                          {log.template_used}
                         </td>
-                        <td className="max-w-xs truncate px-5 py-3.5 text-slate-400">
-                          {log.subject || '—'}
+                        <td className="px-5 py-3.5">
+                          <span
+                            className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-semibold capitalize ${
+                              log.status === 'sent'
+                                ? 'bg-emerald-500/15 text-emerald-300'
+                                : 'bg-rose-500/15 text-rose-300'
+                            }`}
+                          >
+                            {log.status === 'sent' ? (
+                              <CheckCircle2 className="h-3 w-3" />
+                            ) : (
+                              <XCircle className="h-3 w-3" />
+                            )}
+                            {log.status}
+                          </span>
                         </td>
                       </tr>
                     ))}
@@ -1195,94 +1299,30 @@ export default function DashboardPage() {
       {organization && (
         <>
           <CreateInvoiceModal
-            open={showCreateModal}
-            organizationId={organization.id}
-            defaultCurrency={organization.default_currency}
-            clients={clients}
+            isOpen={showCreateModal}
             onClose={() => setShowCreateModal(false)}
+            organization={organization}
+            clients={clients}
             onCreated={async () => {
-              pushToast('success', 'Invoice created and ready for collection.');
+              pushToast('success', 'Invoice created.');
               await loadWorkspaceData();
             }}
           />
 
           <CsvImportModal
-            open={showCsvModal}
-            organizationId={organization.id}
-            existingClients={clients}
+            isOpen={showCsvModal}
             onClose={() => setShowCsvModal(false)}
-            onImported={async () => {
-              pushToast('success', 'CSV bulk import committed to ledger.');
+            organization={organization}
+            onImported={async (count) => {
+              pushToast(
+                'success',
+                `Imported ${count} invoice${count === 1 ? '' : 's'} from CSV.`
+              );
               await loadWorkspaceData();
             }}
           />
         </>
       )}
     </div>
-  );
-}
-
-function StatusBadge({ status }: { status: InvoiceStatus }) {
-  switch (status) {
-    case 'paid':
-      return (
-        <span className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-semibold text-emerald-300">
-          <CheckCircle2 className="h-3 w-3" />
-          Paid
-        </span>
-      );
-    case 'overdue':
-      return (
-        <span className="inline-flex items-center gap-1 rounded-md border border-rose-500/30 bg-rose-500/10 px-2 py-0.5 text-[11px] font-semibold text-rose-300">
-          <AlertCircle className="h-3 w-3" />
-          Overdue
-        </span>
-      );
-    case 'sent':
-      return (
-        <span className="inline-flex items-center gap-1 rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[11px] font-semibold text-sky-300">
-          <Clock className="h-3 w-3" />
-          Sent
-        </span>
-      );
-    case 'cancelled':
-      return (
-        <span className="inline-flex items-center gap-1 rounded-md border border-slate-700 bg-slate-800/70 px-2 py-0.5 text-[11px] font-semibold text-slate-400">
-          <XCircle className="h-3 w-3" />
-          Cancelled
-        </span>
-      );
-    case 'draft':
-    default:
-      return (
-        <span className="inline-flex items-center gap-1 rounded-md border border-slate-700 bg-slate-800/70 px-2 py-0.5 text-[11px] font-semibold text-slate-300">
-          Draft
-        </span>
-      );
-  }
-}
-
-function ReliabilityBadge({ label }: { label: ReliabilityLabel }) {
-  if (label === 'At Risk') {
-    return (
-      <span className="inline-flex items-center gap-1 rounded-md border border-rose-500/30 bg-rose-500/10 px-2 py-0.5 text-[11px] font-semibold text-rose-300">
-        <ShieldAlert className="h-3 w-3" />
-        At Risk
-      </span>
-    );
-  }
-  if (label === 'Slow Payer') {
-    return (
-      <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[11px] font-semibold text-amber-300">
-        <Clock className="h-3 w-3" />
-        Slow Payer
-      </span>
-    );
-  }
-  return (
-    <span className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-semibold text-emerald-300">
-      <CheckCircle2 className="h-3 w-3" />
-      On-Time
-    </span>
   );
 }
